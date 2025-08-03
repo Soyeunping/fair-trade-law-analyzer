@@ -69,4 +69,4 @@ MIT License
 
 ## 📧 연락처
 
-프로젝트 관련 문의: [이메일 주소]
+프로젝트 관련 문의: [soyeun.lee@sk.com]
