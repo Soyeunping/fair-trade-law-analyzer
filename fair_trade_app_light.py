@@ -1,12 +1,17 @@
 import streamlit as st
 import json
 import os
-from fair_trade_rag import FairTradeRAG
 from law_data_collector import LawDataCollector
+import openai
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
 
 # Streamlit Cloud에서 secrets 사용
 if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # 페이지 설정
 st.set_page_config(
@@ -24,6 +29,98 @@ page = st.sidebar.selectbox(
     "기능 선택",
     ["🏠 홈", "📊 데이터 수집", "🔍 케이스 분석", "📋 법령 요약", "⚙️ 설정"]
 )
+
+class SimpleFairTradeRAG:
+    """간단한 텍스트 검색 기반 법령 분석"""
+    
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words=None)
+        self.documents = []
+        self.doc_vectors = None
+        
+    def load_law_data(self, filename="fair_trade_laws.json"):
+        """법령 데이터 로드"""
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return []
+            
+    def prepare_documents(self, laws):
+        """법령을 검색 가능한 문서로 변환"""
+        documents = []
+        for law in laws:
+            if law.get('content'):
+                documents.append({
+                    'text': f"{law['title']} {law['content']}",
+                    'title': law['title'],
+                    'type': 'full_law'
+                })
+            
+            for article in law.get('articles', []):
+                documents.append({
+                    'text': f"{law['title']} 제{article['number']}조 {article.get('title', '')} {article['content']}",
+                    'title': f"{law['title']} 제{article['number']}조",
+                    'type': 'article',
+                    'article_number': article['number']
+                })
+        
+        self.documents = documents
+        if documents:
+            texts = [doc['text'] for doc in documents]
+            self.doc_vectors = self.vectorizer.fit_transform(texts)
+        
+        return len(documents)
+    
+    def search_relevant_documents(self, query, n_results=5):
+        """쿼리와 관련된 문서 검색"""
+        if not self.documents or self.doc_vectors is None:
+            return []
+            
+        query_vector = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, self.doc_vectors).flatten()
+        
+        # 상위 n_results개 문서 반환
+        top_indices = similarities.argsort()[-n_results:][::-1]
+        results = []
+        
+        for idx in top_indices:
+            results.append({
+                'text': self.documents[idx]['text'],
+                'title': self.documents[idx]['title'],
+                'similarity': similarities[idx]
+            })
+        
+        return results
+    
+    def analyze_case(self, case_description):
+        """케이스 분석"""
+        relevant_docs = self.search_relevant_documents(case_description, n_results=5)
+        
+        if not relevant_docs:
+            return "관련 법령 데이터가 없습니다. 먼저 데이터를 수집해주세요."
+        
+        # OpenAI API 키 확인
+        if not os.environ.get('OPENAI_API_KEY'):
+            return "OpenAI API 키가 설정되지 않았습니다. 설정 페이지에서 API 키를 입력해주세요."
+        
+        context = "관련 법령:\n\n"
+        for i, doc in enumerate(relevant_docs, 1):
+            context += f"{i}. {doc['title']}\n{doc['text'][:500]}...\n\n"
+        
+        try:
+            client = openai.OpenAI()
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "당신은 공정거래 전문 변호사입니다. 주어진 케이스와 관련 법령을 바탕으로 법적 분석을 제공해주세요."},
+                    {"role": "user", "content": f"케이스: {case_description}\n\n{context}\n\n위 케이스를 분석해주세요."}
+                ],
+                temperature=0.1
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"분석 중 오류 발생: {str(e)}"
 
 def home_page():
     """홈 페이지"""
@@ -72,11 +169,11 @@ def home_page():
     else:
         st.warning("⚠️ 법령 데이터가 없습니다. '데이터 수집' 페이지에서 데이터를 수집해주세요.")
     
-    # 벡터 DB 확인
-    if os.path.exists("chroma_db"):
-        st.success("✅ 벡터 데이터베이스 준비됨")
+    # API 키 확인
+    if os.environ.get('OPENAI_API_KEY'):
+        st.success("✅ OpenAI API 키 설정됨")
     else:
-        st.warning("⚠️ 벡터 데이터베이스가 없습니다. '케이스 분석' 페이지에서 초기화해주세요.")
+        st.warning("⚠️ OpenAI API 키가 설정되지 않았습니다. '설정' 페이지에서 API 키를 입력해주세요.")
 
 def data_collection_page():
     """데이터 수집 페이지"""
@@ -115,29 +212,23 @@ def case_analysis_page():
     st.title("🔍 케이스 분석")
     st.markdown("---")
     
-    # RAG 시스템 초기화
-    try:
-        rag = FairTradeRAG()
-        st.success("✅ RAG 시스템이 준비되었습니다.")
-    except Exception as e:
-        st.error(f"❌ RAG 시스템 초기화 실패: {str(e)}")
-        return
+    # 간단한 RAG 시스템 초기화
+    if 'rag' not in st.session_state:
+        st.session_state.rag = SimpleFairTradeRAG()
     
-    # 법령 데이터 확인
+    rag = st.session_state.rag
+    
+    # 법령 데이터 확인 및 로드
     laws = rag.load_law_data()
     if not laws:
         st.warning("⚠️ 법령 데이터가 없습니다. 먼저 데이터를 수집해주세요.")
         return
     
-    # 벡터 DB 초기화
-    if st.button("🔄 벡터 데이터베이스 초기화"):
-        with st.spinner("벡터 데이터베이스를 생성하고 있습니다..."):
-            try:
-                documents = rag.prepare_documents(laws)
-                rag.create_vector_database(documents)
-                st.success("✅ 벡터 데이터베이스가 생성되었습니다!")
-            except Exception as e:
-                st.error(f"❌ 벡터 데이터베이스 생성 실패: {str(e)}")
+    # 문서 준비
+    if not rag.documents:
+        with st.spinner("법령 데이터를 준비하고 있습니다..."):
+            doc_count = rag.prepare_documents(laws)
+            st.success(f"✅ {doc_count}개의 문서가 준비되었습니다!")
     
     st.markdown("---")
     
@@ -208,42 +299,24 @@ def law_summary_page():
     st.title("📋 법령 요약")
     st.markdown("---")
     
-    try:
-        rag = FairTradeRAG()
-    except Exception as e:
-        st.error(f"❌ RAG 시스템 초기화 실패: {str(e)}")
+    if 'rag' not in st.session_state:
+        st.session_state.rag = SimpleFairTradeRAG()
+    
+    rag = st.session_state.rag
+    laws = rag.load_law_data()
+    
+    if not laws:
+        st.warning("⚠️ 법령 데이터가 없습니다. 먼저 데이터를 수집해주세요.")
         return
     
-    # 요약 옵션
-    summary_type = st.radio(
-        "요약 유형 선택:",
-        ["전체 법령 요약", "특정 법령 요약"]
-    )
-    
-    if summary_type == "특정 법령 요약":
-        law_name = st.text_input(
-            "법령명 입력:",
-            placeholder="예: 공정거래법, 하도급법, 상생협력법"
-        )
-        
-        if st.button("📋 요약 생성", type="primary") and law_name.strip():
-            with st.spinner("법령을 요약하고 있습니다..."):
-                try:
-                    summary = rag.get_law_summary(law_name)
-                    st.subheader(f"📋 {law_name} 요약")
-                    st.markdown(summary)
-                except Exception as e:
-                    st.error(f"❌ 요약 생성 중 오류 발생: {str(e)}")
-    
-    else:
-        if st.button("📋 전체 요약 생성", type="primary"):
-            with st.spinner("전체 법령을 요약하고 있습니다..."):
-                try:
-                    summary = rag.get_law_summary()
-                    st.subheader("📋 전체 법령 요약")
-                    st.markdown(summary)
-                except Exception as e:
-                    st.error(f"❌ 요약 생성 중 오류 발생: {str(e)}")
+    # 법령 목록 표시
+    st.subheader("📋 수집된 법령 목록")
+    for i, law in enumerate(laws, 1):
+        with st.expander(f"{i}. {law['title']}"):
+            st.write(f"**키워드:** {law.get('keyword', 'N/A')}")
+            if law.get('content'):
+                st.write(f"**내용:** {law['content'][:500]}...")
+            st.write(f"**조문 수:** {len(law.get('articles', []))}")
 
 def settings_page():
     """설정 페이지"""
@@ -256,35 +329,26 @@ def settings_page():
     api_key = st.text_input(
         "OpenAI API 키:",
         type="password",
-        help="OpenAI API 키를 입력하세요. 환경변수 OPENAI_API_KEY로도 설정 가능합니다."
+        help="OpenAI API 키를 입력하세요. Streamlit Cloud에서는 Secrets에서 자동으로 설정됩니다."
     )
     
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
+        openai.api_key = api_key
         st.success("✅ API 키가 설정되었습니다.")
+    elif os.environ.get('OPENAI_API_KEY'):
+        st.success("✅ API 키가 이미 설정되어 있습니다.")
     
     st.markdown("---")
     
     st.subheader("🗂️ 데이터 관리")
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🗑️ 법령 데이터 삭제"):
-            if os.path.exists("fair_trade_laws.json"):
-                os.remove("fair_trade_laws.json")
-                st.success("✅ 법령 데이터가 삭제되었습니다.")
-            else:
-                st.warning("⚠️ 삭제할 법령 데이터가 없습니다.")
-    
-    with col2:
-        if st.button("🗑️ 벡터 DB 삭제"):
-            import shutil
-            if os.path.exists("chroma_db"):
-                shutil.rmtree("chroma_db")
-                st.success("✅ 벡터 데이터베이스가 삭제되었습니다.")
-            else:
-                st.warning("⚠️ 삭제할 벡터 데이터베이스가 없습니다.")
+    if st.button("🗑️ 법령 데이터 삭제"):
+        if os.path.exists("fair_trade_laws.json"):
+            os.remove("fair_trade_laws.json")
+            st.success("✅ 법령 데이터가 삭제되었습니다.")
+        else:
+            st.warning("⚠️ 삭제할 법령 데이터가 없습니다.")
     
     st.markdown("---")
     
@@ -294,11 +358,8 @@ def settings_page():
     if os.path.exists("fair_trade_laws.json"):
         file_size = os.path.getsize("fair_trade_laws.json") / 1024  # KB
         st.info(f"📄 법령 데이터 파일: {file_size:.1f} KB")
-    
-    if os.path.exists("chroma_db"):
-        st.info("📊 벡터 데이터베이스: 준비됨")
     else:
-        st.warning("📊 벡터 데이터베이스: 없음")
+        st.warning("📄 법령 데이터 파일: 없음")
 
 # 페이지 라우팅
 if page == "🏠 홈":
@@ -310,4 +371,4 @@ elif page == "🔍 케이스 분석":
 elif page == "📋 법령 요약":
     law_summary_page()
 elif page == "⚙️ 설정":
-    settings_page() 
+    settings_page()
