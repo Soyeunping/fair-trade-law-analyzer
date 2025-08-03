@@ -1,0 +1,41 @@
+# API Keys and secrets
+.env
+*.key
+
+# Database files
+chroma_db/
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+result.txt
+
+# Data files (will be generated)
+fair_trade_laws.json
+
+# Windows shortcuts
+*.lnk
